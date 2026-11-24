@@ -10,6 +10,12 @@
 // carries a stop loss, a trailing stop once it is up, a fade exit when the
 // tape turns seller-dominated, and a hard time limit.
 //
+// v2 (after the dev-window grade): v1 lost -0.92 SOL with a 28.9% win
+// rate — entries too indiscriminate, losers held too long. v2 requires
+// accelerating inflow and caps any single buyer's share (anti-bundle),
+// raises the net-inflow bar, halves size per coin, and exits faster
+// (stop -15%, trail 20% once up 10%, 1000-slot hold limit).
+//
 // Deterministic by construction: no clock, no environment, no randomness;
 // iteration only over insertion-ordered maps fed by the batch stream, so
 // two runs on the same window produce byte-identical action logs.
@@ -29,31 +35,38 @@ import {
 
 const SOL = Number(LAMPORTS_PER_SOL); // 1e9 lamports
 
-// ---- strategy parameters (v1) ----
+// ---- strategy parameters (v2: selective entry, faster exits) ----
+// v1 graded -0.92 SOL on the dev window (354 fills, 108 coins, win rate
+// 28.9%) — entries were too indiscriminate and losers were held too long.
+// v2 tightens the entry (acceleration + anti-bundle buyer cap + more net
+// inflow) and cuts losers sooner (stop -15%, trail 20%, hold 1000 slots),
+// with smaller size per coin.
 const WINDOW_SLOTS = 50; // tape window, in slots
 const MIN_AGE_SLOTS = 240; // curve must be this old before an entry
 const MIN_TRADES = 6; // trades inside the window
 const MIN_BUYERS = 4; // distinct buying wallets inside the window
-const MIN_NET_SOL = 0.8; // net SOL inflow (buys minus sells) in the window
+const MIN_NET_SOL = 1.2; // net SOL inflow (buys minus sells) in the window
 const MIN_BUY_SHARE = 0.65; // buys' share of window volume
 const MIN_PRICE_UP = 0.06; // price now vs first trade in the window
 const MAX_PRICE_UP = 2.0; // skip curves that already ran too far
 const NEAR_HIGH = 0.96; // price now vs window high
+const MIN_ACCEL = 1.0; // newer-half net inflow must be >= older-half net inflow
+const MAX_BUYER_SHARE = 0.6; // largest single buyer's share of window buy SOL
 const MIN_REAL_SOL = 3; // real SOL reserves at entry
 const MAX_REAL_SOL = 90;
-const FIRST_BUY_SOL = 0.1;
-const ADD_BUY_SOL = 0.1;
-const MAX_PER_COIN_SOL = 0.2;
+const FIRST_BUY_SOL = 0.05;
+const ADD_BUY_SOL = 0.05;
+const MAX_PER_COIN_SOL = 0.1;
 const MAX_ENTRIES_PER_COIN = 2;
 const ADD_PRICE_UP = 0.1; // pyramid only once price is 10% above last buy
 const BUY_SLIPPAGE_BPS = 1500;
 const SELL_SLIPPAGE_BPS = 10_000;
-const STOP_LOSS = 0.25; // exit when value < 75% of cost
-const TRAIL_ARM = 0.15; // trailing stop arms once value >= 115% of cost
-const TRAIL_DROP = 0.3; // exit when value < 70% of peak
+const STOP_LOSS = 0.15; // exit when value < 85% of cost
+const TRAIL_ARM = 0.1; // trailing stop arms once value >= 110% of cost
+const TRAIL_DROP = 0.2; // exit when value < 80% of peak
 const FADE_WINDOW_SLOTS = 15; // exit when net SOL over this window is negative
 const FADE_NET_SOL = -0.3;
-const MAX_HOLD_SLOTS = 1500;
+const MAX_HOLD_SLOTS = 1000;
 const COOLDOWN_SLOTS = 200; // wait after an exit before re-entering a curve
 const MAX_POSITIONS = 5; // caps.max_open_positions on the dev window
 
@@ -99,17 +112,38 @@ interface WindowStats {
   buyers: Set<string>;
   firstPrice: number;
   high: number;
+  netNewer: number; // net SOL inflow in the newer half of the window
+  netOlder: number; // net SOL inflow in the older half of the window
+  maxBuyerSol: number; // largest single buyer's SOL in the window
 }
 
 function windowStats(tape: Tape, slot: number, windowSlots: number): WindowStats {
-  const stats: WindowStats = { trades: 0, buySol: 0, sellSol: 0, buyers: new Set(), firstPrice: 0, high: 0 };
+  const stats: WindowStats = {
+    trades: 0,
+    buySol: 0,
+    sellSol: 0,
+    buyers: new Set(),
+    firstPrice: 0,
+    high: 0,
+    netNewer: 0,
+    netOlder: 0,
+    maxBuyerSol: 0,
+  };
+  const buyerSol = new Map<string, number>();
+  const mid = slot - windowSlots / 2;
   for (const t of tape.trades) {
     if (t.slot < slot - windowSlots) continue;
     if (stats.trades === 0) stats.firstPrice = t.price;
     stats.trades += 1;
+    const net = t.buy ? t.sol : -t.sol;
+    if (t.slot >= mid) stats.netNewer += net;
+    else stats.netOlder += net;
     if (t.buy) {
       stats.buySol += t.sol;
       stats.buyers.add(t.user);
+      const total = (buyerSol.get(t.user) ?? 0) + t.sol;
+      buyerSol.set(t.user, total);
+      if (total > stats.maxBuyerSol) stats.maxBuyerSol = total;
     } else {
       stats.sellSol += t.sol;
     }
@@ -137,6 +171,10 @@ function entrySignal(state: BotState, mint: Pubkey, tape: Tape): boolean {
   const priceUp = priceNow / w.firstPrice - 1;
   if (priceUp < MIN_PRICE_UP || priceUp > MAX_PRICE_UP) return false;
   if (priceNow < NEAR_HIGH * w.high) return false;
+  // Acceleration: inflow must be speeding up, not fading.
+  if (w.netNewer < MIN_ACCEL * Math.max(w.netOlder, 0)) return false;
+  // Anti-bundle: no single wallet may dominate the window's buying.
+  if (w.buySol > 0 && w.maxBuyerSol / w.buySol > MAX_BUYER_SHARE) return false;
   return true;
 }
 
@@ -196,9 +234,13 @@ await runBot({
       }
       const peak = h !== undefined ? h.peakValueLamports : value;
       let exit = false;
-      if (value < (cost * 75n) / 100n) exit = true; // stop loss: -25% vs cost
-      else if (value >= (cost * 115n) / 100n && value < (peak * 70n) / 100n) exit = true; // trailing stop
-      else if (h !== undefined && state.slot - h.openedSlot > MAX_HOLD_SLOTS) exit = true; // time limit
+      if (value < (cost * BigInt(Math.round((1 - STOP_LOSS) * 100))) / 100n) exit = true; // stop loss vs cost
+      else if (
+        value >= (cost * BigInt(Math.round((1 + TRAIL_ARM) * 100))) / 100n &&
+        value < (peak * BigInt(Math.round((1 - TRAIL_DROP) * 100))) / 100n
+      ) {
+        exit = true; // trailing stop
+      } else if (h !== undefined && state.slot - h.openedSlot > MAX_HOLD_SLOTS) exit = true; // time limit
       else {
         const tape = tapes.get(mint);
         if (tape !== undefined) {
