@@ -15,6 +15,10 @@
 // accelerating inflow and caps any single buyer's share (anti-bundle),
 // raises the net-inflow bar, halves size per coin, and exits faster
 // (stop -15%, trail 20% once up 10%, 1000-slot hold limit).
+// v3: v2 still lost -0.37 SOL on 159 round trips; gross trading PnL was
+// nearly breakeven (-0.04 SOL) and fees did the damage, so v3 trades
+// less often — a stricter entry bar (net inflow 2 SOL, 5+ buyers,
+// 8+ trades, +10% price) to cut fee bleed while keeping guardrail room.
 //
 // Deterministic by construction: no clock, no environment, no randomness;
 // iteration only over insertion-ordered maps fed by the batch stream, so
@@ -43,11 +47,11 @@ const SOL = Number(LAMPORTS_PER_SOL); // 1e9 lamports
 // with smaller size per coin.
 const WINDOW_SLOTS = 50; // tape window, in slots
 const MIN_AGE_SLOTS = 240; // curve must be this old before an entry
-const MIN_TRADES = 6; // trades inside the window
-const MIN_BUYERS = 4; // distinct buying wallets inside the window
-const MIN_NET_SOL = 1.2; // net SOL inflow (buys minus sells) in the window
+const MIN_TRADES = 8; // trades inside the window
+const MIN_BUYERS = 5; // distinct buying wallets inside the window
+const MIN_NET_SOL = 2.0; // net SOL inflow (buys minus sells) in the window
 const MIN_BUY_SHARE = 0.65; // buys' share of window volume
-const MIN_PRICE_UP = 0.06; // price now vs first trade in the window
+const MIN_PRICE_UP = 0.1; // price now vs first trade in the window
 const MAX_PRICE_UP = 2.0; // skip curves that already ran too far
 const NEAR_HIGH = 0.96; // price now vs window high
 const MIN_ACCEL = 1.0; // newer-half net inflow must be >= older-half net inflow
