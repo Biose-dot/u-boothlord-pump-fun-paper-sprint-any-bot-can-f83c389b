@@ -7,12 +7,12 @@
 // into a 10% rise, hard exits on stop loss, trailing stop, fading tape, or age.
 // Fully deterministic: no clock, no randomness, insertion-ordered maps only.
 
-import { runBot, LAMPORTS_PER_SOL } from './vendor/makefun-bot.ts';
+import { runBot } from './vendor/makefun-bot.ts';
 import type { Batch, BotState, OrderInput, Pubkey } from './vendor/makefun-bot.ts';
 
 const SOL = 1_000_000_000;
 const WINDOW = 50;
-const MIN_NET_SOL = 1.0;
+const MIN_NET_SOL = 1.2;
 const MIN_BUYERS = 4;
 const MIN_BUY_SHARE = 0.65;
 const MIN_PRICE_UP = 0.06;
