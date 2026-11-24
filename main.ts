@@ -185,7 +185,6 @@ await runBot({
           held.delete(mint);
           const t = tapeOf(mint);
           if (h.filled) t.lastExit = now;
-          else t.entries--;
         }
         continue;
       }
