@@ -5,7 +5,9 @@
 // and sitting near its window high, inflow accelerating into the second half,
 // and no single buyer dominating (anti-bundle). Small first buy, one pyramid
 // into a 10% rise, hard exits on stop loss, trailing stop, fading tape, or age.
-// Fully deterministic: no clock, no randomness, insertion-ordered maps only.
+// At most two entries per curve: without the cap the bot churns the same curve
+// after every exit and the round-trip fees eat the edge. Fully deterministic:
+// no clock, no randomness, insertion-ordered maps only.
 
 import { runBot } from './vendor/makefun-bot.ts';
 import type { Batch, BotState, OrderInput, Pubkey } from './vendor/makefun-bot.ts';
@@ -29,6 +31,7 @@ const TRAIL_ARM = 0.1;
 const MAX_HOLD = 1000;
 const COOLDOWN = 200;
 const MAX_POSITIONS = 5;
+const MAX_ENTRIES_PER_CURVE = 2;
 const CURVE_FEE = 0.0125;
 const BUY_SLIP_BPS = 500;
 const SELL_SLIP_BPS = 10_000;
@@ -46,6 +49,7 @@ interface Tape {
   created: number | null;
   trades: TapeTrade[];
   lastExit: number;
+  entries: number;
 }
 
 interface Held {
@@ -64,7 +68,7 @@ const held = new Map<Pubkey, Held>();
 function tapeOf(mint: Pubkey): Tape {
   let t = tapes.get(mint);
   if (t === undefined) {
-    t = { created: null, trades: [], lastExit: -1e12 };
+    t = { created: null, trades: [], lastExit: -1e12, entries: 0 };
     tapes.set(mint, t);
   }
   return t;
@@ -181,6 +185,7 @@ await runBot({
           held.delete(mint);
           const t = tapeOf(mint);
           if (h.filled) t.lastExit = now;
+          else t.entries--;
         }
         continue;
       }
@@ -211,6 +216,7 @@ await runBot({
 
     // Entries and the single pyramid add.
     let freeLamports = state.freeCashLamports();
+    let openSlots = MAX_POSITIONS - state.committedPositionCount();
     const firstLamports = BigInt(Math.floor(FIRST_BUY_SOL * SOL));
     const addLamports = BigInt(Math.floor(ADD_BUY_SOL * SOL));
     for (const mint of traded) {
@@ -222,13 +228,16 @@ await runBot({
       const h = held.get(mint);
       const price = priceOf(curve.virtual_quote_reserves, curve.virtual_token_reserves);
       if (h === undefined) {
-        if (state.committedPositionCount() >= MAX_POSITIONS) continue;
+        if (openSlots <= 0) continue;
         if (now - t.lastExit < COOLDOWN) continue;
+        if (t.entries >= MAX_ENTRIES_PER_CURVE) continue;
         if (!entrySignal(t, now)) continue;
         if (state.maxBuyLamports(mint) < firstLamports) continue;
         if (freeLamports < firstLamports + state.txFeeLamports()) continue;
         orders.push({ side: 'buy', mint, quote_lamports: firstLamports, max_slippage_bps: BUY_SLIP_BPS });
         freeLamports -= firstLamports + state.txFeeLamports();
+        openSlots--;
+        t.entries++;
         held.set(mint, {
           opened: now,
           peak: 0,
