@@ -21,6 +21,9 @@
 // two runs on the same window produce byte-identical action logs.
 //
 // Paper trading only: the replay uses market data, never real funds.
+//
+// DRAFT v1 (transcript-authored rewrite): net-inflow bar temporarily 1.1
+// SOL; v2 final restores it to 1.2 SOL.
 
 import {
   LAMPORTS_PER_SOL,
@@ -45,7 +48,7 @@ const WINDOW_SLOTS = 50; // tape window, in slots
 const MIN_AGE_SLOTS = 240; // curve must be this old before an entry
 const MIN_TRADES = 6; // trades inside the window
 const MIN_BUYERS = 4; // distinct buying wallets inside the window
-const MIN_NET_SOL = 1.2; // net SOL inflow (buys minus sells) in the window
+const MIN_NET_SOL = 1.1; // net SOL inflow (buys minus sells) in the window — DRAFT, final is 1.2
 const MIN_BUY_SHARE = 0.65; // buys' share of window volume
 const MIN_PRICE_UP = 0.06; // price now vs first trade in the window
 const MAX_PRICE_UP = 2.0; // skip curves that already ran too far
